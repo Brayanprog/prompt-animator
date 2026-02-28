@@ -1,181 +1,161 @@
 
 
-# Fix Code Persistence, Duration Control, Editable Timeline, Conversational AI, and Voiceover
+# Fix Chat Leaking to Code Panel, AI-Driven Workflow, and Polish
 
-## Problems to Fix
+## Problems Found
 
-1. **Code overwrites instead of building on previous**: Each generation replaces the entire scene. The AI has no memory of previous code -- it starts fresh every time.
-2. **Duration mismatch**: User asks for "20 second video" but gets 6 seconds. The AI prompt doesn't extract or enforce the requested duration.
-3. **Properties and clips not editable**: Timeline clips can't be selected, deleted, copied, or reordered. The properties panel sliders work but aren't connected to meaningful editing.
-4. **AI doesn't converse**: It generates code immediately instead of asking clarifying questions or discussing the video concept.
-5. **No voiceover**: User wants TTS audio synced to the video.
+1. **Chat responses show in the code panel**: In `Index.tsx` line 104-107, `chatWithAI()` streams to `setStreamingCode()` which displays in both the code panel and editing panel. Chat text should only appear in the chat box.
+
+2. **Code not stored as files**: Currently each scene holds a single `componentCode` string. There's no file/folder structure. Users want to see organized code like a real project.
+
+3. **TTS is manual**: The voiceover section in `EditingPanel` asks the user to type a script and click "Generate Voice". It should be the AI that writes the script and generates audio automatically as part of its workflow.
+
+4. **FPS and duration sliders clutter the UI**: Users don't use these — they just prompt. The sliders in `EditingPanel` lines 76-86 should be removed.
+
+5. **AI has no structured workflow**: It rushes to generate visuals in one shot. It should follow: Script -> Audio -> Visuals, scene by scene.
 
 ---
 
 ## Plan
 
-### 1. Multi-Scene Project Model (Code Persistence)
+### 1. Fix Chat Streaming Leak
 
-Replace the single `RemotionScene` with a **project** that holds multiple scenes/clips:
+**In `Index.tsx`**: Add a separate `streamingChat` state for chat responses. Use `setStreamingChat` (not `setStreamingCode`) when calling `chatWithAI()`. Pass `streamingChat` to `ChatPanel` for display.
 
+**In `ChatPanel.tsx`**: Show `streamingChat` as a live assistant message bubble (not in the code area). When streaming finishes, clear it and add the final message.
+
+This ensures chat text only appears in the chat panel, and code streaming only appears in the code/editing panel.
+
+### 2. Add Project File Tree
+
+**In `scene-types.ts`**: Add a `ProjectFile` type:
 ```text
-Project
-  - scenes: RemotionScene[]     (ordered list of scenes)
-  - activeSceneIndex: number    (which scene is being edited)
-  - globalSettings: { width, height, fps }
-```
-
-**In `scene-types.ts`**: Add a `VideoProject` type with a `scenes` array. Each scene gets an `id`, `name`, `componentCode`, `durationInFrames`, and optional `voiceover` field.
-
-**In `use-scene-editor.ts`**: Track `scenes[]` and `activeSceneIndex`. Add `addScene()`, `removeScene()`, `duplicateScene()`, `updateScene(index, partial)`, `reorderScenes()`.
-
-**In `ai.ts`**: When generating, pass the current scene's code as context in the prompt so the AI can modify it rather than replacing it:
-```text
-"Here is the current code for this scene:\n{existingCode}\n\nUser wants: {prompt}\n\nModify the code to incorporate the changes."
-```
-
-### 2. Duration-Aware Generation
-
-**In `ai.ts`**: Before calling the AI, parse the user prompt for duration hints ("20 seconds", "1 minute", "30s"). Calculate `durationInFrames = seconds * fps` and inject it into the system prompt:
-
-```text
-"The user requested a {X} second video. Set durationInFrames to {X * fps}."
-```
-
-Also update the system prompt to emphasize: "Use the FULL duration. Animate across ALL frames, not just the first few seconds."
-
-### 3. Conversational AI Mode
-
-**In `ai.ts`**: Add a `chatWithAI()` function separate from `generateSceneStreaming()`. This function uses a conversational system prompt that tells the AI to:
-- Ask clarifying questions about the video (tone, style, target audience, key messages)
-- Only generate code when the user says "generate" or "create it" or when enough info is gathered
-- Suggest improvements after generation
-
-**In `Index.tsx`**: Detect intent from user message:
-- If message contains action words ("create", "make", "generate", "build"), call `generateSceneStreaming()`
-- Otherwise, call `chatWithAI()` for conversation
-- Pass full message history to both functions for context
-
-**In `ChatPanel.tsx`**: The suggestions after generation become smarter -- based on what's actually in the scene (parsed from the code).
-
-### 4. Editable Timeline Clips
-
-**In `TimelinePanel.tsx`**:
-- Add click-to-select on clips (highlight selected clip, show selection border)
-- Right-click or action buttons: Delete, Duplicate, Rename
-- Drag to reorder clips (basic drag handler using mouse events)
-- Each clip maps to a scene in the project's `scenes[]` array
-- Clicking a clip switches `activeSceneIndex` and loads that scene in the preview + code editor
-
-**In `EditingPanel.tsx`**:
-- Show which scene is active (scene name, index)
-- Copy code button
-- Delete scene button
-- Properties (FPS, duration) apply to the active scene
-
-### 5. Browser-Side Voiceover with Xenova/Transformers.js
-
-**New file `src/lib/tts.ts`**:
-- Use `@huggingface/transformers` (the newer package name for xenova/transformers) with the `Xenova/speecht5_tts` model
-- Export `generateVoiceover(text: string, onProgress): Promise<AudioBuffer>`
-- The pipeline runs entirely in the browser using ONNX Runtime
-- Model downloads on first use (~100MB), cached after that
-
-**In `scene-types.ts`**: Add to RemotionScene:
-```text
-voiceover?: {
-  text: string;
-  audioUrl: string;  // blob URL of generated audio
+ProjectFile {
+  path: string      // e.g. "scenes/scene-1.jsx"
+  content: string   // the code
+  sceneId: string   // links to a RemotionScene
 }
 ```
 
-**In `VideoPreview.tsx`**: Play the audio blob in sync with the Remotion Player using an `<audio>` element that starts/stops/seeks in sync with the player's frame events.
+Add `files: ProjectFile[]` to `VideoProject`.
 
-**In `TimelinePanel.tsx`**: Show a second track row for audio/voiceover clips beneath the video clips.
+**In `EditingPanel.tsx`**: Replace the raw code textarea with a simple file explorer:
+- Left column: file tree showing `scenes/scene-1.jsx`, `scenes/scene-2.jsx`, `audio/voiceover-1.wav`
+- Right column: code viewer for the selected file
+- Each generated scene auto-creates a file entry
+- Audio files appear when voiceover is generated
 
-**In `EditingPanel.tsx`**: Add a "Voiceover" section where users can type text, click "Generate Voice", hear a preview, and attach it to the active scene.
+### 3. AI-Driven Voiceover (Not Manual)
 
-**In `ai.ts`**: When the AI generates a scene, it can also suggest voiceover text in its JSON output:
+**Remove** the manual voiceover text input and "Generate Voice" button from `EditingPanel`.
+
+**In `ai.ts`**: The AI already outputs a `voiceoverText` field. After scene generation, automatically:
+1. Extract `voiceoverText` from the AI output
+2. Call `generateVoiceover(voiceoverText)` from `tts.ts`
+3. Attach the audio URL to the scene
+
+**In `Index.tsx`**: After `generateSceneStreaming()` returns, check for `result.voiceoverText`. If present, set status to `"generating-voice"`, call TTS, then attach audio to the scene. Show progress in chat.
+
+### 4. Remove FPS/Duration Sliders
+
+**In `EditingPanel.tsx`**: Remove the entire "Composition info" section (lines 70-87) with FPS slider and duration slider. Keep only:
+- Scene name and duplicate/delete buttons
+- File tree + code viewer
+- Read-only info line showing dimensions and duration
+
+### 5. AI Workflow: Script -> Audio -> Visuals
+
+**In `ai.ts`**: Add a new `generateVideoWorkflow()` function that orchestrates:
+
+**Step 1 — Script**: Ask the AI to write a video script with scene breakdowns:
 ```text
-{"code":"...", "voiceover": "Welcome to OpenClaw...", "durationInFrames": 600, ...}
+System: "Write a video script. Output JSON: { scenes: [{ title, narration, visualDescription, durationSeconds }] }"
 ```
+Stream this to chat so user sees the plan.
 
-### 6. Updated AI System Prompt
+**Step 2 — Audio**: For each scene's narration text, call `generateVoiceover()`. Show progress in chat.
 
-The prompt will be restructured to:
-- Accept conversation history as context
-- Know the current scene code (for modifications)
-- Respect user-specified duration
-- Output voiceover text alongside code
-- Use React.createElement (no JSX)
+**Step 3 — Visuals**: For each scene, call `generateSceneStreaming()` with the visual description as prompt and the duration from the script. Stream code to the code panel.
+
+**Step 4 — Assembly**: Add all scenes to the project in order. Each scene knows its position in the timeline.
+
+**In `Index.tsx`**: When the user's prompt is a "generate" intent, call `generateVideoWorkflow()` instead of `generateSceneStreaming()` directly. The workflow function accepts callbacks for updating chat messages, streaming code, and progress.
+
+**In `ChatPanel.tsx`**: Show workflow steps as status messages:
+- "Writing script..." with the script preview
+- "Generating voiceover for scene 1..." 
+- "Creating visuals for scene 1..."
+- "Done! 3 scenes created."
+
+### 6. Simplify Sidebar
+
+**In `SidebarNav.tsx`**: Remove "Media" tab (composition info moves into a collapsible section of the editing panel). Keep: New, Projects, Chat, Code.
 
 ---
 
 ## Technical Details
 
-### Duration parsing (ai.ts)
+### New streaming states (Index.tsx)
 ```text
-function parseDuration(prompt: string, fps: number): number | null {
-  const match = prompt.match(/(\d+)\s*(second|sec|s|minute|min|m)\b/i);
-  if (!match) return null;
-  const num = parseInt(match[1]);
-  const unit = match[2].toLowerCase();
-  const seconds = unit.startsWith("m") ? num * 60 : num;
-  return seconds * fps;
+const [streamingChat, setStreamingChat] = useState("");  // for chat replies
+const [streamingCode, setStreamingCode] = useState("");  // for code generation only
+const [workflowStep, setWorkflowStep] = useState("");    // "script" | "audio" | "visuals" | ""
+```
+
+### Workflow function signature (ai.ts)
+```text
+interface WorkflowCallbacks {
+  onScriptToken: (text: string) => void;
+  onCodeToken: (code: string) => void;
+  onStepChange: (step: string, detail: string) => void;
+  onSceneReady: (scene: RemotionScene) => void;
+  fps: number;
+}
+
+async function generateVideoWorkflow(
+  prompt: string,
+  callbacks: WorkflowCallbacks
+): Promise<RemotionScene[]>
+```
+
+### Script generation prompt (ai.ts)
+```text
+"You are a video scriptwriter. Given a topic, write a structured script.
+Output ONLY a JSON array:
+[{ "title": "...", "narration": "...", "visualDescription": "...", "durationSeconds": N }]
+Each scene should be 3-10 seconds. Total should match user's requested duration.
+DO NOT output anything except the JSON array."
+```
+
+### ProjectFile type (scene-types.ts)
+```text
+interface ProjectFile {
+  id: string;
+  path: string;        // "scenes/intro.jsx"
+  content: string;     // component code
+  sceneId?: string;    // links to RemotionScene
+  type: "scene" | "audio" | "config";
 }
 ```
 
-### Conversation vs generation detection (Index.tsx)
+### File tree in EditingPanel
 ```text
-const ACTION_WORDS = /\b(create|make|generate|build|animate|design|show|render)\b/i;
-const isGenerateIntent = ACTION_WORDS.test(userMessage);
+scenes/
+  scene-1-intro.jsx        <- click to view code
+  scene-2-features.jsx
+audio/
+  voiceover-1.wav          <- shows audio player
+  voiceover-2.wav
 ```
-
-### TTS pipeline (tts.ts)
-```text
-import { pipeline } from "@huggingface/transformers";
-
-let synthesizer = null;
-
-export async function generateVoiceover(text, onProgress) {
-  if (!synthesizer) {
-    synthesizer = await pipeline("text-to-speech", "Xenova/speecht5_tts", {
-      progress_callback: onProgress
-    });
-  }
-  const result = await synthesizer(text, { speaker_embeddings: "..." });
-  // Convert to blob URL
-  const blob = new Blob([result.audio], { type: "audio/wav" });
-  return URL.createObjectURL(blob);
-}
-```
-
-### Audio sync with Remotion Player (VideoPreview.tsx)
-```text
-// On frameupdate event:
-const audioTime = frame / fps;
-if (Math.abs(audioEl.currentTime - audioTime) > 0.1) {
-  audioEl.currentTime = audioTime;
-}
-// On play: audioEl.play()
-// On pause: audioEl.pause()
-```
-
-### Files to Create
-| File | Purpose |
-|------|---------|
-| `src/lib/tts.ts` | Browser-side TTS using Xenova/speecht5_tts |
 
 ### Files to Modify
 | File | Change |
 |------|--------|
-| `package.json` | Add `@huggingface/transformers` |
-| `src/lib/scene-types.ts` | Add `VideoProject` type, voiceover fields |
-| `src/lib/ai.ts` | Conversational mode, duration parsing, context-aware generation, voiceover text output |
-| `src/hooks/use-scene-editor.ts` | Multi-scene project management (add/remove/reorder scenes) |
-| `src/pages/Index.tsx` | Multi-scene state, conversation vs generation routing, voiceover integration |
-| `src/components/VideoPreview.tsx` | Audio sync with player |
-| `src/components/EditingPanel.tsx` | Active scene display, voiceover text input, copy/delete buttons |
-| `src/components/TimelinePanel.tsx` | Selectable/deletable clips, audio track, drag reorder |
-| `src/components/ChatPanel.tsx` | Pass message history, show conversation vs generation states |
+| `src/lib/scene-types.ts` | Add `ProjectFile`, add `files` to `VideoProject` |
+| `src/lib/ai.ts` | Add `generateVideoWorkflow()`, add script generation prompt |
+| `src/pages/Index.tsx` | Separate `streamingChat` from `streamingCode`, workflow integration, auto-TTS |
+| `src/components/ChatPanel.tsx` | Show `streamingChat` as live bubble, show workflow steps |
+| `src/components/EditingPanel.tsx` | Remove sliders, add file tree, remove manual voiceover input |
+| `src/components/SidebarNav.tsx` | Remove "Media" tab |
+| `src/components/TimelinePanel.tsx` | Minor: auto-update when workflow adds scenes |
 
