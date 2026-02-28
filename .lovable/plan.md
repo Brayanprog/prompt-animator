@@ -1,138 +1,181 @@
 
 
-# Fix Errors, Add Live Code Streaming, and Clean Up Platform
+# Fix Code Persistence, Duration Control, Editable Timeline, Conversational AI, and Voiceover
 
-## Problems Identified
+## Problems to Fix
 
-**1. "Render error: Unexpected token '<'"** -- The `remotion-renderer.tsx` uses `new Function()` which cannot parse JSX. The AI generates code containing JSX (`<div>`, `<h1>`, etc.) but `new Function()` only understands plain JavaScript. JSX needs to be transpiled to `React.createElement()` calls before execution.
+1. **Code overwrites instead of building on previous**: Each generation replaces the entire scene. The AI has no memory of previous code -- it starts fresh every time.
+2. **Duration mismatch**: User asks for "20 second video" but gets 6 seconds. The AI prompt doesn't extract or enforce the requested duration.
+3. **Properties and clips not editable**: Timeline clips can't be selected, deleted, copied, or reordered. The properties panel sliders work but aren't connected to meaningful editing.
+4. **AI doesn't converse**: It generates code immediately instead of asking clarifying questions or discussing the video concept.
+5. **No voiceover**: User wants TTS audio synced to the video.
 
-**2. "AI returned invalid JSON"** -- The small local model (Qwen2.5-Coder-1.5B) often fails to produce valid JSON with properly escaped code strings. The current parsing is brittle -- it tries `JSON.parse()` once and gives up.
-
-**3. No live code visibility** -- The AI generates everything in one shot, and the user only sees the result (or error) at the end. There's no streaming or progress feedback showing the code being written.
-
-**4. Cluttered UI** -- Multiple unused/legacy components (Timeline.tsx, PromptBar.tsx, ExportButton.tsx, StatusIndicator.tsx, NavLink.tsx, renderer.ts) and the sidebar has tabs (Templates, Timeline) that don't do anything useful.
-
-**5. App.css conflicts** -- `src/App.css` sets `max-width: 1280px` and `padding: 2rem` on `#root`, which constrains the full-screen editor layout.
-
-## To answer your question about React in the browser
-
-Yes, Remotion's React code works entirely in the browser without Node.js. The `@remotion/player` package renders React components as animations directly in the DOM. The only limitation is video **export** (encoding to MP4) which normally needs a server -- but for preview and WebM capture, everything runs client-side.
+---
 
 ## Plan
 
-### Step 1: Fix JSX Rendering (the "Unexpected token '<'" error)
+### 1. Multi-Scene Project Model (Code Persistence)
 
-The core issue: `new Function()` cannot parse JSX syntax. Two fixes needed:
+Replace the single `RemotionScene` with a **project** that holds multiple scenes/clips:
 
-- **Change the AI system prompt** to instruct the model to output `React.createElement()` calls instead of JSX. This avoids needing a JSX transpiler entirely. The prompt will include clear examples using `React.createElement("div", { style: {...} }, children)` instead of `<div style={...}>`.
-- **Add a JSX-to-createElement fallback** in `remotion-renderer.tsx`: if the code contains `<` characters (indicating JSX), attempt a simple regex-based transform of common patterns before falling back to the error message. This catches cases where the AI still outputs JSX despite instructions.
+```text
+Project
+  - scenes: RemotionScene[]     (ordered list of scenes)
+  - activeSceneIndex: number    (which scene is being edited)
+  - globalSettings: { width, height, fps }
+```
 
-### Step 2: Fix JSON Parsing (the "invalid JSON" error)
+**In `scene-types.ts`**: Add a `VideoProject` type with a `scenes` array. Each scene gets an `id`, `name`, `componentCode`, `durationInFrames`, and optional `voiceover` field.
 
-Make the AI output format more robust:
+**In `use-scene-editor.ts`**: Track `scenes[]` and `activeSceneIndex`. Add `addScene()`, `removeScene()`, `duplicateScene()`, `updateScene(index, partial)`, `reorderScenes()`.
 
-- **Use streaming** with WebLLM to accumulate tokens, then extract the code more reliably.
-- **Add multiple extraction strategies** in `ai.ts`: try JSON.parse first, then regex extraction of the `"code"` field, then treat the entire output as code if it contains `return` and `React.createElement`.
-- **Add auto-retry** (1 retry with a slightly rephrased prompt) before showing the error to the user.
+**In `ai.ts`**: When generating, pass the current scene's code as context in the prompt so the AI can modify it rather than replacing it:
+```text
+"Here is the current code for this scene:\n{existingCode}\n\nUser wants: {prompt}\n\nModify the code to incorporate the changes."
+```
 
-### Step 3: Add Live Code Streaming
+### 2. Duration-Aware Generation
 
-Switch `generateScene()` to use WebLLM's streaming API (`stream: true`):
+**In `ai.ts`**: Before calling the AI, parse the user prompt for duration hints ("20 seconds", "1 minute", "30s"). Calculate `durationInFrames = seconds * fps` and inject it into the system prompt:
 
-- As tokens arrive, accumulate and display them in real-time in the code panel.
-- Add a new `generateSceneStreaming()` function that accepts an `onToken(partialCode: string)` callback.
-- The `Index.tsx` will pass this callback to update a `streamingCode` state, which the CodePanel/EditingPanel will display live.
-- The code panel will auto-scroll to follow new tokens during generation.
+```text
+"The user requested a {X} second video. Set durationInFrames to {X * fps}."
+```
 
-### Step 4: Clean Up UI and Remove Dead Code
+Also update the system prompt to emphasize: "Use the FULL duration. Animate across ALL frames, not just the first few seconds."
 
-**Delete unused files:**
-- `src/components/Timeline.tsx` (legacy canvas-based timeline, replaced by TimelinePanel)
-- `src/components/PromptBar.tsx` (replaced by ChatPanel's built-in prompt area)
-- `src/components/ExportButton.tsx` (replaced by header Download button)
-- `src/components/StatusIndicator.tsx` (status shown inline in ChatPanel)
-- `src/components/NavLink.tsx` (unused)
-- `src/lib/renderer.ts` (legacy canvas renderer, replaced by Remotion)
+### 3. Conversational AI Mode
 
-**Clean up App.css:**
-- Remove the `#root` max-width/padding rules that conflict with the full-screen layout.
+**In `ai.ts`**: Add a `chatWithAI()` function separate from `generateSceneStreaming()`. This function uses a conversational system prompt that tells the AI to:
+- Ask clarifying questions about the video (tone, style, target audience, key messages)
+- Only generate code when the user says "generate" or "create it" or when enough info is gathered
+- Suggest improvements after generation
 
-**Simplify SidebarNav:**
-- Remove "Timeline" tab (timeline is always visible at the bottom)
-- Remove "Templates" tab (not implemented)
-- Keep: New, Projects, Chat, Media, Code
+**In `Index.tsx`**: Detect intent from user message:
+- If message contains action words ("create", "make", "generate", "build"), call `generateSceneStreaming()`
+- Otherwise, call `chatWithAI()` for conversation
+- Pass full message history to both functions for context
 
-**Simplify EditingPanel:**
-- Merge Properties panel into a cleaner layout: composition info at top, live code editor below.
-- Remove the separate CodePanel sidebar -- instead, the code is always visible in the right panel's code editor section.
+**In `ChatPanel.tsx`**: The suggestions after generation become smarter -- based on what's actually in the scene (parsed from the code).
 
-### Step 5: Improve AI Prompt Quality
+### 4. Editable Timeline Clips
 
-Rewrite the system prompt to:
-- Use `React.createElement()` exclusively (no JSX)
-- Provide 3 diverse examples (text animation, shape motion, multi-element scene)
-- Be more explicit about the JSON format constraints
-- Add negative examples ("DO NOT use JSX syntax like <div>")
+**In `TimelinePanel.tsx`**:
+- Add click-to-select on clips (highlight selected clip, show selection border)
+- Right-click or action buttons: Delete, Duplicate, Rename
+- Drag to reorder clips (basic drag handler using mouse events)
+- Each clip maps to a scene in the project's `scenes[]` array
+- Clicking a clip switches `activeSceneIndex` and loads that scene in the preview + code editor
+
+**In `EditingPanel.tsx`**:
+- Show which scene is active (scene name, index)
+- Copy code button
+- Delete scene button
+- Properties (FPS, duration) apply to the active scene
+
+### 5. Browser-Side Voiceover with Xenova/Transformers.js
+
+**New file `src/lib/tts.ts`**:
+- Use `@huggingface/transformers` (the newer package name for xenova/transformers) with the `Xenova/speecht5_tts` model
+- Export `generateVoiceover(text: string, onProgress): Promise<AudioBuffer>`
+- The pipeline runs entirely in the browser using ONNX Runtime
+- Model downloads on first use (~100MB), cached after that
+
+**In `scene-types.ts`**: Add to RemotionScene:
+```text
+voiceover?: {
+  text: string;
+  audioUrl: string;  // blob URL of generated audio
+}
+```
+
+**In `VideoPreview.tsx`**: Play the audio blob in sync with the Remotion Player using an `<audio>` element that starts/stops/seeks in sync with the player's frame events.
+
+**In `TimelinePanel.tsx`**: Show a second track row for audio/voiceover clips beneath the video clips.
+
+**In `EditingPanel.tsx`**: Add a "Voiceover" section where users can type text, click "Generate Voice", hear a preview, and attach it to the active scene.
+
+**In `ai.ts`**: When the AI generates a scene, it can also suggest voiceover text in its JSON output:
+```text
+{"code":"...", "voiceover": "Welcome to OpenClaw...", "durationInFrames": 600, ...}
+```
+
+### 6. Updated AI System Prompt
+
+The prompt will be restructured to:
+- Accept conversation history as context
+- Know the current scene code (for modifications)
+- Respect user-specified duration
+- Output voiceover text alongside code
+- Use React.createElement (no JSX)
 
 ---
 
 ## Technical Details
 
-### Streaming API usage (ai.ts)
+### Duration parsing (ai.ts)
 ```text
-const chunks = await engine.chat.completions.create({
-  messages: [...],
-  stream: true,
-  temperature: 0.3,
-  max_tokens: 3000,
-});
-
-let accumulated = "";
-for await (const chunk of chunks) {
-  accumulated += chunk.choices[0]?.delta?.content || "";
-  onToken(accumulated);
+function parseDuration(prompt: string, fps: number): number | null {
+  const match = prompt.match(/(\d+)\s*(second|sec|s|minute|min|m)\b/i);
+  if (!match) return null;
+  const num = parseInt(match[1]);
+  const unit = match[2].toLowerCase();
+  const seconds = unit.startsWith("m") ? num * 60 : num;
+  return seconds * fps;
 }
 ```
 
-### JSX-free code example (what AI will generate)
+### Conversation vs generation detection (Index.tsx)
 ```text
-const frame = useCurrentFrame();
-const opacity = interpolate(frame, [0, 30], [0, 1], { extrapolateRight: "clamp" });
-return React.createElement("div", {
-  style: { width: 1280, height: 720, background: "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center" }
-}, React.createElement("div", {
-  style: { fontSize: 48, color: "white", opacity }
-}, "Hello World"));
+const ACTION_WORDS = /\b(create|make|generate|build|animate|design|show|render)\b/i;
+const isGenerateIntent = ACTION_WORDS.test(userMessage);
 ```
 
-### Robust JSON extraction (ai.ts)
+### TTS pipeline (tts.ts)
 ```text
-1. Try JSON.parse(content)
-2. Try extracting JSON from markdown fences
-3. Try regex: match /"code"\s*:\s*"([\s\S]*?)"\s*,/ and extract fields
-4. If content contains "return" and "React.createElement", treat entire content as code with default dimensions
+import { pipeline } from "@huggingface/transformers";
+
+let synthesizer = null;
+
+export async function generateVoiceover(text, onProgress) {
+  if (!synthesizer) {
+    synthesizer = await pipeline("text-to-speech", "Xenova/speecht5_tts", {
+      progress_callback: onProgress
+    });
+  }
+  const result = await synthesizer(text, { speaker_embeddings: "..." });
+  // Convert to blob URL
+  const blob = new Blob([result.audio], { type: "audio/wav" });
+  return URL.createObjectURL(blob);
+}
 ```
+
+### Audio sync with Remotion Player (VideoPreview.tsx)
+```text
+// On frameupdate event:
+const audioTime = frame / fps;
+if (Math.abs(audioEl.currentTime - audioTime) > 0.1) {
+  audioEl.currentTime = audioTime;
+}
+// On play: audioEl.play()
+// On pause: audioEl.pause()
+```
+
+### Files to Create
+| File | Purpose |
+|------|---------|
+| `src/lib/tts.ts` | Browser-side TTS using Xenova/speecht5_tts |
 
 ### Files to Modify
 | File | Change |
 |------|--------|
-| `src/lib/ai.ts` | Streaming API, new prompt with React.createElement, robust parsing |
-| `src/lib/remotion-renderer.tsx` | JSX fallback detection |
-| `src/pages/Index.tsx` | Add streamingCode state, pass to panels, clean up |
-| `src/components/SidebarNav.tsx` | Remove Timeline/Templates tabs |
-| `src/components/EditingPanel.tsx` | Merge code view, show streaming code |
-| `src/components/ChatPanel.tsx` | Show streaming progress with live token count |
-| `src/App.css` | Remove conflicting #root styles |
-
-### Files to Delete
-| File | Reason |
-|------|--------|
-| `src/components/Timeline.tsx` | Legacy, replaced by TimelinePanel |
-| `src/components/PromptBar.tsx` | Replaced by ChatPanel |
-| `src/components/ExportButton.tsx` | Replaced by header button |
-| `src/components/StatusIndicator.tsx` | Unused |
-| `src/components/NavLink.tsx` | Unused |
-| `src/lib/renderer.ts` | Legacy canvas renderer |
-| `src/components/CodePanel.tsx` | Merged into EditingPanel |
-| `src/components/MediaPanel.tsx` | Merged into EditingPanel as composition info |
+| `package.json` | Add `@huggingface/transformers` |
+| `src/lib/scene-types.ts` | Add `VideoProject` type, voiceover fields |
+| `src/lib/ai.ts` | Conversational mode, duration parsing, context-aware generation, voiceover text output |
+| `src/hooks/use-scene-editor.ts` | Multi-scene project management (add/remove/reorder scenes) |
+| `src/pages/Index.tsx` | Multi-scene state, conversation vs generation routing, voiceover integration |
+| `src/components/VideoPreview.tsx` | Audio sync with player |
+| `src/components/EditingPanel.tsx` | Active scene display, voiceover text input, copy/delete buttons |
+| `src/components/TimelinePanel.tsx` | Selectable/deletable clips, audio track, drag reorder |
+| `src/components/ChatPanel.tsx` | Pass message history, show conversation vs generation states |
 
